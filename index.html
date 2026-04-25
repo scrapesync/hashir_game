@@ -277,7 +277,7 @@ canvas{display:block;position:absolute;inset:0}
 <div class="menu-row">
 <button class="btn-secondary" id="zenBtn">🧘 Calm</button>
 <button class="btn-secondary" id="howBtn">❓ How</button>
-<button class="btn-secondary" id="musicBtn">🎵 Music</button>
+<button class="btn-secondary" id="musicBtn">🎵 Music: ON</button>
 </div>
 </div>
 
@@ -340,7 +340,7 @@ canvas{display:block;position:absolute;inset:0}
 <div class="modal-card">
 <h3>HOW TO PLAY</h3>
 <ul>
-<li>👈👉 <b>Swipe</b> to move Cloudy left/right</li>
+<li>👈👉 <b>Swipe</b> to move Hashir left/right</li>
 <li>🪐 <b>Catch planets</b>: +15 each (POPS!)</li>
 <li>⭐ <b>Stars</b>: +5 each</li>
 <li>👦 <b>Hashir bonus</b>: +100 + extra life!</li>
@@ -394,6 +394,9 @@ magnet:false,magnetTimer:0,
 boostTimer:0,
 hitCooldown:0,
 pickupsCaught:0,
+nextQuizAt:8,
+quizCount:0,
+quizDifficulty:0,
 weapon:null,weaponTimer:0,weaponShotCooldown:0
 };
 
@@ -429,15 +432,46 @@ var WEAPONS=[
 {name:'ELECTRIC',emoji:'⚡',shotInterval:400,shots:1,duration:7000,color:'#00F5FF',electric:true}
 ];
 
-// AUDIO ENGINE
+// AUDIO ENGINE - careful handling of browser autoplay policies
 var audioCtx=null;
+var audioReady=false;
 function ensureAudio(){
 if(!audioCtx){
 try{audioCtx=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return null}
 }
-if(audioCtx.state==='suspended')audioCtx.resume();
+if(audioCtx.state==='suspended'){
+audioCtx.resume().then(function(){audioReady=true});
+}else{
+audioReady=true;
+}
 return audioCtx;
 }
+// Wire up unlock on ANY first user interaction (required by browser policies)
+function unlockAudio(){
+ensureAudio();
+if(audioCtx&&audioCtx.state==='suspended'){
+audioCtx.resume();
+}
+// Play a tiny silent buffer to fully unlock on iOS
+if(audioCtx){
+try{
+var buf=audioCtx.createBuffer(1,1,22050);
+var src=audioCtx.createBufferSource();
+src.buffer=buf;
+src.connect(audioCtx.destination);
+src.start(0);
+}catch(e){}
+}
+audioReady=true;
+// Try music if it should be playing
+if(state.musicOn&&state.soundOn&&!musicPlaying){
+musicStep=0;
+playMusic();
+}
+}
+['click','touchstart','keydown','pointerdown'].forEach(function(ev){
+window.addEventListener(ev,unlockAudio,{once:false,passive:true});
+});
 function tone(f,d,t,v){
 if(t===undefined)t='sine';
 if(v===undefined)v=0.18;
@@ -473,32 +507,39 @@ var BASS=[131,131,196,196,131,131,196,196,147,147,220,220,147,147,220,220,131,14
 function playMusic(){
 if(!state.musicOn||!state.soundOn){musicPlaying=false;return}
 var c=ensureAudio();if(!c){return}
+// Don't start if context isn't actually running
+if(c.state!=='running'){
+musicPlaying=false;
+musicTimer=setTimeout(playMusic,250); // retry shortly
+return;
+}
 musicPlaying=true;
 var note=MELODY[musicStep%MELODY.length];
 var bass=BASS[musicStep%BASS.length];
 try{
+// MELODY (louder, triangle wave for warmth)
 var o=c.createOscillator(),g=c.createGain();
 o.connect(g);g.connect(c.destination);
 o.type='triangle';o.frequency.setValueAtTime(note.n,c.currentTime);
 g.setValueAtTime(0,c.currentTime);
-g.linearRampToValueAtTime(0.07,c.currentTime+0.02);
+g.linearRampToValueAtTime(0.15,c.currentTime+0.02);
 g.exponentialRampToValueAtTime(0.001,c.currentTime+note.d);
 o.start();o.stop(c.currentTime+note.d+0.1);
-// Bass
+// Bass (louder)
 var o2=c.createOscillator(),g2=c.createGain();
 o2.connect(g2);g2.connect(c.destination);
 o2.type='sine';o2.frequency.setValueAtTime(bass,c.currentTime);
 g2.setValueAtTime(0,c.currentTime);
-g2.linearRampToValueAtTime(0.05,c.currentTime+0.02);
+g2.linearRampToValueAtTime(0.12,c.currentTime+0.02);
 g2.exponentialRampToValueAtTime(0.001,c.currentTime+note.d*0.85);
 o2.start();o2.stop(c.currentTime+note.d+0.1);
-// Hi-hat percussion every other note
+// Hi-hat
 if(musicStep%2===0){
 var o3=c.createOscillator(),g3=c.createGain(),f=c.createBiquadFilter();
 o3.type='square';o3.frequency.setValueAtTime(8000,c.currentTime);
 f.type='highpass';f.frequency.value=5000;
 o3.connect(f);f.connect(g3);g3.connect(c.destination);
-g3.setValueAtTime(0.02,c.currentTime);
+g3.setValueAtTime(0.04,c.currentTime);
 g3.exponentialRampToValueAtTime(0.001,c.currentTime+0.06);
 o3.start();o3.stop(c.currentTime+0.07);
 }
@@ -629,20 +670,27 @@ return {type:'color-count',tag:'COUNT',q:'How many '+c2.name+' balls?',speakQ:'H
 }
 }
 if(t==='add'){
-var a=Math.floor(Math.random()*9)+1;
-var b=Math.floor(Math.random()*9)+1;
+// Scale difficulty: easy starts 1-9, then up to 1-15, 1-20, etc.
+var maxN=Math.min(9+state.quizDifficulty*2,25);
+var a=Math.floor(Math.random()*maxN)+1;
+var b=Math.floor(Math.random()*maxN)+1;
 return generateMathOpts('add',a,b,a+b,'+','plus');
 }
-var aa=Math.floor(Math.random()*9)+3;
-var bb=Math.floor(Math.random()*Math.min(aa-1,8))+1;
+if(t==='sub'){
+var maxN=Math.min(9+state.quizDifficulty*2,25);
+var aa=Math.floor(Math.random()*maxN)+3;
+var bb=Math.floor(Math.random()*Math.min(aa-1,maxN))+1;
 return generateMathOpts('sub',aa,bb,aa-bb,'-','minus');
+}
 }
 
 function generateMathOpts(type,a,b,correct,op,opWord){
 var wrongs=new Set();
+// Make wrong answers harder to spot at higher difficulty (closer to correct)
+var spread=Math.max(2,5-Math.floor(state.quizDifficulty/2));
 while(wrongs.size<3){
-var w=correct+Math.floor(Math.random()*7)-3;
-if(w!==correct&&w>=0&&w<=20)wrongs.add(w);
+var w=correct+Math.floor(Math.random()*(spread*2+1))-spread;
+if(w!==correct&&w>=0&&w<=50)wrongs.add(w);
 }
 var wArr=Array.from(wrongs);
 var opts=[{val:correct,correct:true}].concat(wArr.map(function(w){return {val:w,correct:false}})).sort(function(){return Math.random()-0.5});
@@ -726,60 +774,158 @@ gx.setLineDash([]);
 }
 
 function drawCloud(x,y){
+// Now draws HASHIR ROBOT character instead of cloud
 gx.save();
 gx.translate(x,y);
-// shadow
-gx.fillStyle='rgba(0,0,0,0.35)';
-gx.beginPath();gx.ellipse(0,30,52,15,0,0,Math.PI*2);gx.fill();
+
+// Bobbing animation
+var bob=Math.sin(gameTime*0.005)*3;
+gx.translate(0,bob);
+
+// shadow on ground
+gx.fillStyle='rgba(0,0,0,0.4)';
+gx.beginPath();gx.ellipse(0,55,38,8,0,0,Math.PI*2);gx.fill();
+
 // hit flash
 if(state.hitCooldown>0&&Math.floor(state.hitCooldown/100)%2===0)gx.globalAlpha=0.5;
-// shield
-if(state.shielded){
-gx.strokeStyle='rgba(0,245,255,0.6)';gx.lineWidth=4;
-gx.beginPath();gx.arc(0,-5,65,0,Math.PI*2);gx.stroke();
-}
-// puffs
-gx.fillStyle='#fff';
-var puffs=[[-32,0,23],[-10,-20,26],[18,-23,24],[38,-3,25],[44,16,21],[-22,16,22],[0,5,30],[22,16,21]];
-for(var i=0;i<puffs.length;i++){gx.beginPath();gx.arc(puffs[i][0],puffs[i][1],puffs[i][2],0,Math.PI*2);gx.fill()}
-// face
-var eyeOffsetX=(state.targetLane-state.currentLane)*3;
-gx.fillStyle='#fff';gx.strokeStyle='#fff';gx.lineWidth=3;
-gx.beginPath();gx.ellipse(-15,-10,10,12,-0.15,0,Math.PI*2);gx.fill();gx.stroke();
-gx.beginPath();gx.ellipse(15,-10,10,12,0.15,0,Math.PI*2);gx.fill();gx.stroke();
-gx.fillStyle='#1a1a1a';
-gx.beginPath();gx.ellipse(-15+eyeOffsetX,-7,5,6,-0.15,0,Math.PI*2);gx.fill();
-gx.beginPath();gx.ellipse(15+eyeOffsetX,-7,5,6,0.15,0,Math.PI*2);gx.fill();
-gx.fillStyle='#fff';
-gx.beginPath();gx.arc(-13+eyeOffsetX,-12,1.6,0,Math.PI*2);gx.fill();
-gx.beginPath();gx.arc(17+eyeOffsetX,-12,1.6,0,Math.PI*2);gx.fill();
-gx.strokeStyle='#1a1a1a';gx.lineWidth=2.5;gx.lineCap='round';
-gx.beginPath();gx.arc(0,8,7,0.2,Math.PI-0.2);gx.stroke();
 
-// Weapon visualization on cloud
+// shield bubble around character
+if(state.shielded){
+gx.strokeStyle='rgba(0,245,255,0.7)';gx.lineWidth=4;
+gx.shadowBlur=20;gx.shadowColor='#00F5FF';
+gx.beginPath();gx.arc(0,0,55,0,Math.PI*2);gx.stroke();
+gx.shadowBlur=0;
+}
+
+// LEGS (gray pants)
+var legSwing=Math.sin(gameTime*0.012)*8;
+gx.fillStyle='#64748B';
+// left leg
+gx.save();
+gx.translate(-9,30);
+gx.rotate(legSwing*0.05);
+gx.fillRect(-6,0,12,22);
+// shoe
+gx.fillStyle='#1F2937';
+gx.fillRect(-8,20,16,6);
+gx.restore();
+// right leg
+gx.fillStyle='#64748B';
+gx.save();
+gx.translate(9,30);
+gx.rotate(-legSwing*0.05);
+gx.fillRect(-6,0,12,22);
+gx.fillStyle='#1F2937';
+gx.fillRect(-8,20,16,6);
+gx.restore();
+
+// BODY (red sweater)
+var bodyGrad=gx.createLinearGradient(0,-10,0,30);
+bodyGrad.addColorStop(0,'#E63946');
+bodyGrad.addColorStop(1,'#C1121F');
+gx.fillStyle=bodyGrad;
+gx.beginPath();
+// Round-shoulder body
+gx.moveTo(-22,-10);
+gx.quadraticCurveTo(-26,-5,-24,15);
+gx.lineTo(-20,30);
+gx.lineTo(20,30);
+gx.lineTo(24,15);
+gx.quadraticCurveTo(26,-5,22,-10);
+gx.closePath();
+gx.fill();
+// Body shading
+gx.fillStyle='rgba(0,0,0,0.18)';
+gx.beginPath();
+gx.moveTo(8,-10);gx.lineTo(24,15);gx.lineTo(20,30);gx.lineTo(15,30);gx.lineTo(15,-10);
+gx.closePath();gx.fill();
+// Logo badge on chest
+gx.fillStyle='#fff';
+gx.beginPath();
+gx.moveTo(7,2);gx.lineTo(18,2);gx.lineTo(18,12);gx.quadraticCurveTo(12.5,18,7,12);gx.closePath();
+gx.fill();
+gx.fillStyle='#E63946';
+gx.font='bold 5px Fredoka,sans-serif';
+gx.textAlign='center';gx.textBaseline='middle';
+gx.fillText('HASHIR',12.5,7);
+// Soccer ball on badge
+gx.fillStyle='#000';
+gx.beginPath();gx.arc(12.5,13,2.5,0,Math.PI*2);gx.fill();
+
+// ARMS
+var armSwing=Math.sin(gameTime*0.012)*15;
+// left arm
+gx.save();
+gx.translate(-22,-5);
+gx.rotate(0.2+armSwing*0.02);
+gx.fillStyle=bodyGrad;
+gx.fillRect(-6,0,12,32);
+// hand
+gx.fillStyle='#F4C2A1';
+gx.beginPath();gx.arc(0,34,5,0,Math.PI*2);gx.fill();
+gx.restore();
+// right arm
+gx.save();
+gx.translate(22,-5);
+gx.rotate(-0.2-armSwing*0.02);
+gx.fillStyle=bodyGrad;
+gx.fillRect(-6,0,12,32);
+gx.fillStyle='#F4C2A1';
+gx.beginPath();gx.arc(0,34,5,0,Math.PI*2);gx.fill();
+gx.restore();
+
+// HEAD - Hashir face image clipped to circle
+if(HASHIR_IMG.complete&&HASHIR_IMG.naturalWidth>0){
+var headSize=24;
+var headY=-30;
+// Glow ring
+gx.shadowBlur=15;gx.shadowColor='#FFBE0B';
+gx.fillStyle='#FFBE0B';
+gx.beginPath();gx.arc(0,headY,headSize+3,0,Math.PI*2);gx.fill();
+gx.shadowBlur=0;
+// Clipped image
+gx.save();
+gx.beginPath();gx.arc(0,headY,headSize,0,Math.PI*2);gx.clip();
+gx.drawImage(HASHIR_IMG,-headSize,headY-headSize,headSize*2,headSize*2);
+gx.restore();
+// Border
+gx.strokeStyle='#FFBE0B';gx.lineWidth=2.5;
+gx.beginPath();gx.arc(0,headY,headSize,0,Math.PI*2);gx.stroke();
+}else{
+// Fallback if image not loaded
+gx.fillStyle='#F4C2A1';
+gx.beginPath();gx.arc(0,-30,24,0,Math.PI*2);gx.fill();
+}
+
+// Weapon visualization
 if(state.weapon){
 var w=state.weapon;
 if(w.name==='DOUBLE GUN'){
-gx.fillStyle='#444';
-gx.fillRect(-30,18,8,12);gx.fillRect(22,18,8,12);
-gx.fillStyle='#FFBE0B';gx.fillRect(-29,28,6,3);gx.fillRect(23,28,6,3);
+gx.fillStyle='#1F2937';
+gx.fillRect(-30,15,10,8);gx.fillRect(20,15,10,8);
+gx.fillStyle='#FFBE0B';gx.fillRect(-30,20,4,3);gx.fillRect(26,20,4,3);
 }else if(w.name==='TRIPLE GUN'){
-gx.fillStyle='#444';
-gx.fillRect(-32,18,7,12);gx.fillRect(-3,18,6,12);gx.fillRect(25,18,7,12);
+gx.fillStyle='#1F2937';
+gx.fillRect(-32,15,8,8);gx.fillRect(-4,12,8,8);gx.fillRect(24,15,8,8);
 gx.fillStyle='#06FFA5';
+gx.fillRect(-32,18,3,3);gx.fillRect(-4,15,3,3);gx.fillRect(29,18,3,3);
 }else if(w.name==='MISSILES'){
-gx.fillStyle='#FF006E';gx.beginPath();gx.moveTo(0,18);gx.lineTo(-6,28);gx.lineTo(6,28);gx.closePath();gx.fill();
+gx.fillStyle='#FF006E';
+gx.beginPath();gx.moveTo(-15,16);gx.lineTo(-22,28);gx.lineTo(-8,28);gx.closePath();gx.fill();
+gx.beginPath();gx.moveTo(15,16);gx.lineTo(8,28);gx.lineTo(22,28);gx.closePath();gx.fill();
 }else if(w.name==='ELECTRIC'){
-// electric arcs
 gx.strokeStyle='#00F5FF';gx.lineWidth=2;
-for(var i=0;i<3;i++){
+gx.shadowBlur=8;gx.shadowColor='#00F5FF';
+for(var i=0;i<4;i++){
 gx.beginPath();
-gx.moveTo(-15+Math.random()*30,18);
-gx.lineTo(-15+Math.random()*30,30);
+gx.moveTo(-20+i*12+(Math.random()-0.5)*4,15);
+gx.lineTo(-18+i*12+(Math.random()-0.5)*4,28);
 gx.stroke();
 }
+gx.shadowBlur=0;
 }
 }
+
 gx.globalAlpha=1;
 gx.restore();
 }
@@ -1250,8 +1396,9 @@ spawnBurst(x,y,p.emoji,5);
 }
 document.getElementById('coins').textContent=state.coins;
 
-// Trigger quiz every 20 pickups
-if(state.pickupsCaught>0&&state.pickupsCaught%20===0&&p.type!=='hashir'){
+// Trigger quiz: first at 8 catches, then 9, 10, 11... (increases by 1 each time)
+if(state.pickupsCaught>=state.nextQuizAt&&p.type!=='hashir'){
+state.nextQuizAt=state.pickupsCaught+state.quizCount+9; // next gets harder to reach
 setTimeout(showSkillCard,400);
 }
 }
@@ -1320,6 +1467,8 @@ var QUIZ_TIME=15; // 15 seconds
 
 function showSkillCard(){
 state.paused=true;
+state.quizCount++;
+state.quizDifficulty=Math.floor(state.quizCount/2); // difficulty rises every 2 quizzes
 stopMusic(); // pause music during question
 var card=generateChallenge();
 currentQuizCard=card;
@@ -1385,8 +1534,10 @@ document.getElementById('skillCardWrap').classList.add('active');
 // Speak the question
 setTimeout(function(){speak(card.speakQ||card.q)},300);
 
-// Start timer
-quizTimeLeft=QUIZ_TIME;
+// Start timer - shorter at higher difficulty (15s → 8s minimum)
+var thisQuizTime=Math.max(8,15-state.quizDifficulty);
+quizTimeLeft=thisQuizTime;
+state.thisQuizTime=thisQuizTime;
 updateTimerDisplay();
 if(quizTimer)clearInterval(quizTimer);
 quizTimer=setInterval(function(){
@@ -1401,7 +1552,8 @@ timeoutQuiz();
 }
 
 function updateTimerDisplay(){
-var pct=quizTimeLeft/QUIZ_TIME;
+var maxT=state.thisQuizTime||QUIZ_TIME;
+var pct=quizTimeLeft/maxT;
 var dashOffset=119.4*(1-pct);
 document.getElementById('timerFg').setAttribute('stroke-dashoffset',dashOffset);
 document.getElementById('timerNum').textContent=Math.max(0,quizTimeLeft);
@@ -1498,6 +1650,9 @@ state.magnet=false;state.magnetTimer=0;
 state.boostTimer=0;
 state.hitCooldown=0;
 state.pickupsCaught=0;
+state.nextQuizAt=8;
+state.quizCount=0;
+state.quizDifficulty=0;
 state.weapon=null;state.weaponTimer=0;
 pickups=[];obstacles=[];particles=[];projectiles=[];popEffects=[];
 gameTime=0;spawnTimer=0;obstacleTimer=0;
@@ -1564,15 +1719,15 @@ function closeZen(){document.getElementById('zenOverlay').classList.remove('acti
 function closeModal(){document.getElementById('howModal').classList.remove('active')}
 
 document.getElementById('welcomeBtn').onclick=function(){
-ensureAudio();sfxLevelUp();
+unlockAudio();sfxLevelUp();
 document.getElementById('welcome').classList.remove('active');
 document.getElementById('home').classList.add('active');
 document.getElementById('bestScore').textContent=state.bestScore;
 document.getElementById('totalCoins').textContent=state.totalCoins;
 setChibiAction('dance');
 setTimeout(function(){setChibiAction('idle')},2500);
-// Start music on first interaction
-if(state.musicOn&&!musicPlaying)playMusic();
+// Force music start
+if(state.musicOn){musicStep=0;setTimeout(playMusic,200)}
 };
 document.getElementById('playBtn').onclick=function(){
 setChibiAction('run');
@@ -1582,8 +1737,13 @@ document.getElementById('zenBtn').onclick=openZen;
 document.getElementById('howBtn').onclick=function(){document.getElementById('howModal').classList.add('active')};
 document.getElementById('musicBtn').onclick=function(){
 state.musicOn=!state.musicOn;
-this.textContent=state.musicOn?'🎵 Music':'🔇 Music';
-if(!state.musicOn)stopMusic();else playMusic();
+this.textContent=state.musicOn?'🎵 Music: ON':'🔇 Music: OFF';
+if(!state.musicOn){stopMusic()}
+else{
+unlockAudio();
+musicStep=0;
+setTimeout(playMusic,100);
+}
 };
 document.getElementById('soundBtn').onclick=function(){
 state.soundOn=!state.soundOn;
